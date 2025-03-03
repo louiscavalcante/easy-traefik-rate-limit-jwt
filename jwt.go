@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -11,6 +12,9 @@ import (
 
 	jwt "github.com/golang-jwt/jwt/v5"
 )
+
+// Initialize a custom logger that writes to stderr
+var errorLogger = log.New(os.Stderr, "", 0)
 
 // Config holds the plugin configuration
 type Config struct {
@@ -106,9 +110,9 @@ func (p *JwtPlugin) logError(err error, isExpired bool) {
 	// Get current time in UTC
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	
-	// Log to stderr with color formatting
-	// Grey timestamp, red ERR, and regular text message
-	fmt.Fprintf(os.Stderr, "\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s\n", timestamp, err.Error())
+	// Use logger instead of fmt.Fprintf for more reliable output
+	errorLogger.Printf("\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s", 
+		timestamp, err.Error())
 }
 
 // ServeHTTP implements the http.Handler interface
