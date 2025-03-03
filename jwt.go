@@ -131,7 +131,10 @@ func (p *JwtPlugin) logError(err error, isExpired bool) {
 	
 	// For file-based stderr, this would ensure it's flushed to disk
 	if f, ok := stderr.(*os.File); ok {
-		f.Sync()
+		if err := f.Sync(); err != nil {
+			// If sync fails, try one more direct attempt to log the error
+			fmt.Fprintf(os.Stderr, "Failed to sync error log: %v\n", err)
+		}
 	}
 }
 
