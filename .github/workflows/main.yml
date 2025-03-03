@@ -1,0 +1,62 @@
+name: Main
+
+on:
+    push:
+        branches:
+            - main
+    pull_request:
+
+jobs:
+    main:
+        name: Main Process
+        runs-on: ubuntu-latest
+        env:
+            GO_VERSION: '1.22'
+            GOLANGCI_LINT_VERSION: v1.56.2
+            CGO_ENABLED: 0
+
+        steps:
+            # Set up Go
+            - name: Set up Go ${{ env.GO_VERSION }}
+              uses: actions/setup-go@v4
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+
+            # Check out code
+            - name: Check out code
+              uses: actions/checkout@v4
+
+            # Cache Go modules
+            - name: Cache Go modules
+              uses: actions/cache@v3
+              with:
+                  path: ~/go/pkg/mod
+                  key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+                  restore-keys: |
+                      ${{ runner.os }}-go-
+
+            # Install golangci-lint
+            - name: Install golangci-lint ${{ env.GOLANGCI_LINT_VERSION }}
+              run: |
+                  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin ${GOLANGCI_LINT_VERSION}
+                  golangci-lint --version
+
+            # Check dependencies
+            - name: Check and get dependencies
+              run: |
+                  go mod tidy
+                  go mod download
+                  go mod vendor
+
+            # Build and test
+            - name: Build
+              run: go build -v ./...
+
+            # Run tests
+            - name: Run tests
+              run: go test -v -cover ./...
+
+            # Run linter
+            - name: Run linter
+              continue-on-error: false
+              run: golangci-lint run ./... --timeout=5m

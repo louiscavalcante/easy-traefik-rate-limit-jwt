@@ -1,0 +1,40 @@
+displayName: Easy Traefik Rate Limit JWT Plugin
+type: middleware
+iconPath: .assets/icon.png
+
+import: github.com/louiscavalcante/easy-traefik-rate-limit-jwt
+
+summary: 'Easy and flexible JWT validation middleware with rate limiting, public routes, and expiration bypass'
+
+testData:
+    JwtPayloadFields:
+        - exp
+        - _id
+    Alg: HS256
+    Secret:
+        - test-secret
+    InjectNewHeaders:
+        X-Rate-Limit-ID:
+            From:
+                - JwtPayloadFields
+                - Sources
+            Values:
+                - _id
+                - X-Mobile-ID
+    Sources:
+        - type: bearer
+          key: Authorization
+        - type: header
+          key: X-Mobile-ID
+    ExpirationMessage: 'Custom token expired message'
+    ErrorMessage: 'Something bad happened!'
+    RoutesToBypassTokenExpiration:
+        - match: Host(`api.example.com`) && Method(`PUT`) && PathPrefix(`/bypass`)
+    RoutesToBypassJwtValidation:
+        - match: Host(`api.example.com`) && Method(`GET`) && PathPrefix(`/public`)
+          InjectNewHeaders:
+              X-Rate-Limit-ID:
+                  From:
+                      - Sources
+                  Key:
+                      - X-Mobile-ID
