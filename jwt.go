@@ -4,20 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
-)
-
-// Create a synchronized writer for thread-safe logging
-var (
-	stderr io.Writer = os.Stderr
-	logMu  sync.Mutex
 )
 
 // Config holds the plugin configuration
@@ -114,27 +106,15 @@ func (p *JwtPlugin) logError(err error, isExpired bool) {
 	// Get current time in UTC
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	
-	// Format the log message
-	logMessage := fmt.Sprintf("\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s\n", 
+	// Log to stderr with color formatting
+	// Grey timestamp, red ERR, and regular text message
+	_, writeErr := fmt.Fprintf(os.Stderr, "\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s\n", 
 		timestamp, err.Error())
 	
-	// Use mutex to ensure thread-safe writing and avoid interleaved output
-	logMu.Lock()
-	defer logMu.Unlock()
-	
-	// Write directly to stderr with synchronized access
-	_, writeErr := stderr.Write([]byte(logMessage))
+	// We need to check the error to satisfy the linter, but there's not much we can do if stderr fails
 	if writeErr != nil {
-		// If we can't write to stderr, not much we can do except try one more direct attempt
-		fmt.Fprintf(os.Stderr, "Failed to log error: %v\n", writeErr)
-	}
-	
-	// For file-based stderr, this would ensure it's flushed to disk
-	if f, ok := stderr.(*os.File); ok {
-		if err := f.Sync(); err != nil {
-			// If sync fails, try one more direct attempt to log the error
-			fmt.Fprintf(os.Stderr, "Failed to sync error log: %v\n", err)
-		}
+		// Attempt one more direct write as a last resort
+		os.Stderr.WriteString(fmt.Sprintf("Failed to log error: %v\n", writeErr))
 	}
 }
 
