@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
-// Initialize a custom logger that writes to stderr
-var errorLogger = log.New(os.Stderr, "", 0)
+// Create a synchronized writer for thread-safe logging
+var (
+	stderr io.Writer = os.Stderr
+	logMu  sync.Mutex
+)
 
 // Config holds the plugin configuration
 type Config struct {
@@ -110,9 +114,25 @@ func (p *JwtPlugin) logError(err error, isExpired bool) {
 	// Get current time in UTC
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	
-	// Use logger instead of fmt.Fprintf for more reliable output
-	errorLogger.Printf("\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s", 
+	// Format the log message
+	logMessage := fmt.Sprintf("\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s\n", 
 		timestamp, err.Error())
+	
+	// Use mutex to ensure thread-safe writing and avoid interleaved output
+	logMu.Lock()
+	defer logMu.Unlock()
+	
+	// Write directly to stderr with synchronized access
+	_, writeErr := stderr.Write([]byte(logMessage))
+	if writeErr != nil {
+		// If we can't write to stderr, not much we can do except try one more direct attempt
+		fmt.Fprintf(os.Stderr, "Failed to log error: %v\n", writeErr)
+	}
+	
+	// For file-based stderr, this would ensure it's flushed to disk
+	if f, ok := stderr.(*os.File); ok {
+		f.Sync()
+	}
 }
 
 // ServeHTTP implements the http.Handler interface
