@@ -1,5 +1,3 @@
-// Package easy_traefik_rate_limit_jwt provides a Traefik plugin that validates JWT tokens
-// and integrates with rate limiting while supporting public routes and token expiration bypass.
 package easy_traefik_rate_limit_jwt
 
 import (
@@ -14,94 +12,79 @@ import (
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
-// Config holds the plugin configuration.
+// Config holds the plugin configuration
 type Config struct {
-	// Ordered for better memory alignment
-	JwtPayloadFields            []string                   `json:"JwtPayloadFields,omitempty"`
-	Sources                     []Source                   `json:"Sources,omitempty"`
-	RoutesToBypassTokenExpiration []RouteMatch              `json:"RoutesToBypassTokenExpiration,omitempty"`
-	RoutesToBypassJwtValidation  []PublicRouteMatch        `json:"RoutesToBypassJwtValidation,omitempty"`
-	Secret                      []string                   `json:"Secret,omitempty"`
-	InjectNewHeaders            map[string]HeaderValue     `json:"InjectNewHeaders,omitempty"`
-	Alg                         string                     `json:"Alg,omitempty"`
-	ExpirationMessage           string                     `json:"ExpirationMessage,omitempty"`
-	ErrorMessage                string                     `json:"ErrorMessage,omitempty"`
+	JwtPayloadFields              []string                    `json:"JwtPayloadFields,omitempty"`
+	Alg                           string                      `json:"Alg,omitempty"`
+	Secret                        []string                    `json:"Secret,omitempty"`
+	Sources                       []Source                    `json:"Sources,omitempty"`
+	InjectNewHeaders              map[string]HeaderValue      `json:"InjectNewHeaders,omitempty"`
+	ExpirationMessage             string                      `json:"ExpirationMessage,omitempty"`
+	ErrorMessage                  string                      `json:"ErrorMessage,omitempty"`
+	RoutesToBypassTokenExpiration []RouteMatch                `json:"RoutesToBypassTokenExpiration,omitempty"`
+	RoutesToBypassJwtValidation   []PublicRouteMatch          `json:"RoutesToBypassJwtValidation,omitempty"`
 }
 
-// Source defines a source for JWT tokens
+// Source defines a source to look for the JWT token
 type Source struct {
 	Type string `json:"type,omitempty"`
 	Key  string `json:"key,omitempty"`
 }
 
-// RouteMatch defines a route matcher for bypassing token expiration
-type RouteMatch struct {
-	Match string `json:"match,omitempty"`
-}
-
-// PublicRouteMatch defines a route matcher for public routes with header injection
-type PublicRouteMatch struct {
-	Match            string                `json:"match,omitempty"`
-	InjectNewHeaders map[string]PublicHeaderValue `json:"InjectNewHeaders,omitempty"`
-}
-
-// HeaderValue defines how to inject a header value
+// HeaderValue defines header values to inject
 type HeaderValue struct {
 	From   []string `json:"From,omitempty"`
 	Values []string `json:"Values,omitempty"`
 }
 
-// PublicHeaderValue defines how to inject a header value for public routes
+// PublicHeaderValue defines header values to inject for public routes
 type PublicHeaderValue struct {
 	From []string `json:"From,omitempty"`
 	Key  []string `json:"Key,omitempty"`
 }
 
-// CreateConfig creates the default plugin configuration.
-func CreateConfig() *Config {
-	return &Config{
-		JwtPayloadFields:  []string{"exp"},
-		Alg:               "HS256",
-		Secret:            []string{},
-		InjectNewHeaders:  map[string]HeaderValue{},
-		Sources:           []Source{{Type: "bearer", Key: "Authorization"}},
-		ExpirationMessage: "Token has expired",
-		ErrorMessage:      "An error occurred while processing the request",
-	}
+// RouteMatch contains a Traefik route matcher expression
+type RouteMatch struct {
+	Match string `json:"match,omitempty"`
 }
 
-// JwtPlugin is the JWT validation plugin.
+// PublicRouteMatch contains a Traefik route matcher expression and headers to inject
+type PublicRouteMatch struct {
+	Match            string                       `json:"match,omitempty"`
+	InjectNewHeaders map[string]PublicHeaderValue `json:"InjectNewHeaders,omitempty"`
+}
+
+// JwtPlugin implements the Traefik middleware interface
 type JwtPlugin struct {
 	next   http.Handler
 	config *Config
 	name   string
 }
 
-// New creates a new JwtPlugin.
+// CreateConfig creates a new config instance
+func CreateConfig() *Config {
+	return &Config{
+		JwtPayloadFields:  []string{"exp"},
+		Alg:               "HS256",
+		ExpirationMessage: "Token has expired",
+		ErrorMessage:      "An error occurred while processing the request",
+	}
+}
+
+// New creates a new JWT middleware
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	// Validate configuration
 	if len(config.Secret) == 0 {
 		return nil, fmt.Errorf("JWT secret is required")
 	}
 
-	if config.Alg == "" {
-		return nil, fmt.Errorf("JWT algorithm is required")
-	}
-
-	// Validate that the algorithm is supported
-	supportedAlgs := map[string]bool{
-		"RS256": true, "RS384": true, "RS512": true,
-		"PS256": true, "PS384": true, "PS512": true,
-		"ES256": true, "ES384": true, "ES512": true,
-		"HS256": true, "HS384": true, "HS512": true,
-	}
-
-	if !supportedAlgs[config.Alg] {
+	// Validate algorithm
+	switch config.Alg {
+	case "HS256", "HS384", "HS512", "RS256", "RS384", "RS512",
+		"ES256", "ES384", "ES512", "PS256", "PS384", "PS512":
+		// Supported algorithms
+	default:
 		return nil, fmt.Errorf("unsupported JWT algorithm: %s", config.Alg)
-	}
-
-	if len(config.Sources) == 0 {
-		return nil, fmt.Errorf("at least one source is required")
 	}
 
 	return &JwtPlugin{
@@ -111,309 +94,355 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}, nil
 }
 
-// errorResponse sends a JSON error response and logs the error (except for expiration)
-func (j *JwtPlugin) errorResponse(rw http.ResponseWriter, message string, err error, statusCode int, shouldLog bool) {
-	rw.Header().Set("Content-Type", "application/json")
-	rw.WriteHeader(statusCode)
-	
-	// Use custom message if provided
-	responseMsg := message
-	if message == "" {
-		responseMsg = j.config.ErrorMessage
+// logError logs all errors except for token expiration
+// Uses the format: 2025-03-03T22:21:11Z ERR - Easy Traefik Rate Limit JWT: <error-message-here>
+// With timestamp in grey color and ERR in red color
+func (p *JwtPlugin) logError(err error, isExpired bool) {
+	// Don't log token expiration errors
+	if isExpired {
+		return
 	}
 	
-	response := map[string]string{"message": responseMsg}
-	if encodeErr := json.NewEncoder(rw).Encode(response); encodeErr != nil {
-		// Log encoding errors
-		now := time.Now().UTC().Format(time.RFC3339)
-		fmt.Fprintf(os.Stderr, "\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT Plugin: Error encoding JSON response: %v\n", now, encodeErr)
-	}
+	// Get current time in UTC
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	
-	// Log the original error only if shouldLog is true (skip for expiration errors)
-	if shouldLog {
-		now := time.Now().UTC().Format(time.RFC3339)
-		fmt.Fprintf(os.Stderr, "\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT Plugin: %v\n", now, err)
-	}
+	// Log to stderr with color formatting
+	// Grey timestamp, red ERR, and regular text message
+	fmt.Fprintf(os.Stderr, "\033[90m%s\033[0m \033[31mERR\033[0m - Easy Traefik Rate Limit JWT: %s\n", timestamp, err.Error())
 }
 
-// extractToken extracts the JWT token from the request using the configured sources
-func (j *JwtPlugin) extractToken(req *http.Request) (string, map[string]string, error) {
-	sourceValues := make(map[string]string)
+// ServeHTTP implements the http.Handler interface
+func (p *JwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// Check if this is a public route that bypasses JWT validation
+	for _, route := range p.config.RoutesToBypassJwtValidation {
+		if p.matchRoute(req, route.Match) {
+			// This is a public route, inject headers if configured
+			if route.InjectNewHeaders != nil {
+				err := p.injectPublicHeaders(req, route.InjectNewHeaders)
+				if err != nil {
+					p.logError(err, false)
+					p.respondWithError(rw, http.StatusBadRequest, p.config.ErrorMessage)
+					return
+				}
+			}
+			
+			// Skip JWT validation and proceed to the next handler
+			p.next.ServeHTTP(rw, req)
+			return
+		}
+	}
 
-	for _, source := range j.config.Sources {
+	// Check for expiration bypass routes before extracting token
+	var bypassExpiration bool
+	
+	for _, route := range p.config.RoutesToBypassTokenExpiration {
+		if p.matchRoute(req, route.Match) {
+			bypassExpiration = true
+			break
+		}
+	}
+	
+	// Extract token from request
+	token, err := p.extractToken(req)
+	if err != nil {
+		p.logError(err, false)
+		p.respondWithError(rw, http.StatusUnauthorized, p.config.ErrorMessage)
+		return
+	}
+
+	// Parse token with special handling for expiration
+	var claims jwt.MapClaims
+	var parsedToken *jwt.Token
+	
+	if bypassExpiration {
+		// For expiration bypass routes, use a custom parser that ignores expiration
+		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+		claims = jwt.MapClaims{}
+		
+		parsedToken, err = parser.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			// Validate the algorithm
+			if token.Method.Alg() != p.config.Alg {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			
+			// Return the appropriate key based on the algorithm
+			switch p.config.Alg[:2] {
+			case "HS":
+				return []byte(p.config.Secret[0]), nil
+			default:
+				return []byte(p.config.Secret[0]), nil
+			}
+		})
+	} else {
+		// Standard token parsing for non-bypass routes
+		parsedToken, claims, err = p.parseToken(token)
+	}
+	
+	if err != nil {
+		var isExpired bool
+		
+		// Check if the error is due to an expired token
+		if strings.Contains(err.Error(), "token is expired") {
+			isExpired = true
+			
+			// If this route bypasses expiration, proceed anyway
+			if bypassExpiration {
+				// This check confirms we have a signature error, not another kind of error
+				if !strings.Contains(err.Error(), "signature is invalid") {
+					goto TOKEN_VALID
+				}
+			}
+			
+			// Token is expired and route doesn't bypass expiration or has other errors
+			p.logError(err, true) // Won't actually log since isExpired is true
+			p.respondWithError(rw, http.StatusUnauthorized, p.config.ExpirationMessage)
+			return
+		}
+		
+		// Log other JWT errors (not expiration)
+		p.logError(err, isExpired)
+		p.respondWithError(rw, http.StatusUnauthorized, p.config.ErrorMessage)
+		return
+	}
+
+TOKEN_VALID:
+	// Check if token is valid
+	if !parsedToken.Valid {
+		err := fmt.Errorf("invalid token")
+		p.logError(err, false)
+		p.respondWithError(rw, http.StatusUnauthorized, p.config.ErrorMessage)
+		return
+	}
+
+	// Check for required fields in the JWT payload
+	for _, field := range p.config.JwtPayloadFields {
+		if field != "exp" { // "exp" is already checked by the JWT library
+			if _, ok := claims[field]; !ok {
+				err := fmt.Errorf("required field missing: %s", field)
+				p.logError(err, false)
+				p.respondWithError(rw, http.StatusUnauthorized, p.config.ErrorMessage)
+				return
+			}
+		}
+	}
+
+	// Inject headers from JWT payload
+	if p.config.InjectNewHeaders != nil {
+		err := p.injectHeaders(req, claims)
+		if err != nil {
+			p.logError(err, false)
+			p.respondWithError(rw, http.StatusInternalServerError, p.config.ErrorMessage)
+			return
+		}
+	}
+
+	// Token is valid, proceed to the next handler
+	p.next.ServeHTTP(rw, req)
+}
+
+// extractToken extracts the JWT token from the request
+func (p *JwtPlugin) extractToken(req *http.Request) (string, error) {
+	// Try each source in order
+	for _, source := range p.config.Sources {
 		switch source.Type {
 		case "bearer":
 			authHeader := req.Header.Get(source.Key)
 			if authHeader != "" {
-				// Check if the header starts with "Bearer "
-				if strings.HasPrefix(authHeader, "Bearer ") {
-					token := strings.TrimPrefix(authHeader, "Bearer ")
-					sourceValues[source.Key] = token
-					return token, sourceValues, nil
+				// Extract token from "Bearer <token>"
+				parts := strings.Split(authHeader, " ")
+				if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+					return parts[1], nil
 				}
-				sourceValues[source.Key] = authHeader
 			}
 		case "header":
-			headerValue := req.Header.Get(source.Key)
-			if headerValue != "" {
-				sourceValues[source.Key] = headerValue
-				// If this is the first source, try to use it as a token
-				if len(sourceValues) == 1 {
-					return headerValue, sourceValues, nil
-				}
+			tokenHeader := req.Header.Get(source.Key)
+			if tokenHeader != "" {
+				return tokenHeader, nil
 			}
 		case "query":
-			queryValue := req.URL.Query().Get(source.Key)
-			if queryValue != "" {
-				sourceValues[source.Key] = queryValue
-				// If this is the first source, try to use it as a token
-				if len(sourceValues) == 1 {
-					return queryValue, sourceValues, nil
-				}
+			tokenQuery := req.URL.Query().Get(source.Key)
+			if tokenQuery != "" {
+				return tokenQuery, nil
 			}
 		}
 	}
 
-	// If we've collected source values but couldn't find a token
-	if len(sourceValues) > 0 {
-		return "", sourceValues, fmt.Errorf("JWT token not found in any of the sources")
-	}
-
-	return "", sourceValues, fmt.Errorf("JWT token not found in any of the sources")
+	return "", fmt.Errorf("no token found in specified sources")
 }
 
-// validateToken validates the JWT token
-func (j *JwtPlugin) validateToken(tokenString string, ignoreExpiration bool) (map[string]interface{}, error) {
-	// Use parser options for handling expired tokens
-	parserOptions := []jwt.ParserOption{}
-	if ignoreExpiration {
-		parserOptions = append(parserOptions, jwt.WithoutClaimsValidation())
-	}
-	
-	parser := jwt.NewParser(parserOptions...)
-	
-	keyFunc := func(t *jwt.Token) (interface{}, error) {
-		// Verify algorithm
-		if t.Method.Alg() != j.config.Alg {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+// parseToken parses and validates the JWT token
+func (p *JwtPlugin) parseToken(tokenString string) (*jwt.Token, jwt.MapClaims, error) {
+	// Create a map to store claims
+	claims := jwt.MapClaims{}
+
+	// Parse the token
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		// Validate the algorithm
+		if token.Method.Alg() != p.config.Alg {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		
-		return []byte(j.config.Secret[0]), nil
-	}
-	
-	// Parse token with validation
-	token, err := parser.Parse(tokenString, keyFunc)
-	
-	// Handle parse errors
-	if err != nil {
-		if strings.Contains(err.Error(), "token is expired") && !ignoreExpiration {
-			return nil, fmt.Errorf("token is expired")
-		} else if strings.Contains(err.Error(), "token is expired") && ignoreExpiration {
-			// For routes that bypass expiration, we still want to proceed
-		} else {
-			return nil, err
+
+		// Return the appropriate key based on the algorithm
+		switch p.config.Alg[:2] {
+		case "HS":
+			return []byte(p.config.Secret[0]), nil
+		case "RS", "PS", "ES":
+			// For asymmetric algorithms, the secret would be a public key
+			// This is a simplified implementation
+			return []byte(p.config.Secret[0]), nil
+		default:
+			return nil, fmt.Errorf("unsupported algorithm: %s", p.config.Alg)
 		}
-	}
-	
-	// Ensure token is valid
-	if !token.Valid && !ignoreExpiration {
-		return nil, fmt.Errorf("invalid token")
-	}
-	
-	// Extract claims
-	var claims map[string]interface{}
-	jwtClaims, ok := token.Claims.(jwt.MapClaims)
-	
-	if !ok {
-		return nil, fmt.Errorf("invalid claims format")
-	}
-	
-	// Convert JWT claims to map
-	claims = make(map[string]interface{})
-	for k, v := range jwtClaims {
-		claims[k] = v
-	}
-	
-	// Check required fields
-	for _, field := range j.config.JwtPayloadFields {
-		if _, exists := claims[field]; !exists {
-			return nil, fmt.Errorf("required field %s missing from token payload", field)
-		}
-	}
-	
-	return claims, nil
+	})
+
+	return token, claims, err
 }
 
-// matchRoute checks if the request matches a route pattern
-func (j *JwtPlugin) matchRoute(req *http.Request, pattern string) bool {
-	// Simple implementation to check for Host, Method, and PathPrefix
-	// In a real implementation, this would use a proper matcher
-	segments := strings.Split(pattern, " && ")
-	
-	for _, segment := range segments {
-		segment = strings.TrimSpace(segment)
-		
-		if strings.HasPrefix(segment, "Host(") {
-			host := strings.TrimSuffix(strings.TrimPrefix(segment, "Host(`"), "`)")
-			if req.Host != host {
-				return false
-			}
-		} else if strings.HasPrefix(segment, "Method(") {
-			method := strings.TrimSuffix(strings.TrimPrefix(segment, "Method(`"), "`)")
-			if req.Method != method {
-				return false
-			}
-		} else if strings.HasPrefix(segment, "PathPrefix(") {
-			prefix := strings.TrimSuffix(strings.TrimPrefix(segment, "PathPrefix(`"), "`)")
-			if !strings.HasPrefix(req.URL.Path, prefix) {
-				return false
-			}
-		}
-	}
-	
-	return true
-}
-
-// injectHeaders injects headers based on token claims or source values
-func (j *JwtPlugin) injectHeaders(req *http.Request, claims map[string]interface{}, sourceValues map[string]string) {
-	for headerName, headerValue := range j.config.InjectNewHeaders {
-		for i, value := range headerValue.Values {
-			// Skip if there are no values for this header
-			if len(headerValue.Values) == 0 {
-				continue
-			}
-
-			// Check where to get the value from based on the From configuration
-			if i < len(headerValue.From) {
-				switch headerValue.From[i] {
-				case "JwtPayloadFields":
-					// Get the value from JWT payload
-					if claimValue, ok := claims[value]; ok {
-						// Convert the claim value to string
-						var strValue string
-						switch v := claimValue.(type) {
-						case string:
-							strValue = v
-						case float64:
-							strValue = fmt.Sprintf("%v", v)
-						case bool:
-							strValue = fmt.Sprintf("%v", v)
-						default:
-							// For complex types, convert to JSON
-							jsonBytes, err := json.Marshal(v)
-							if err == nil {
-								strValue = string(jsonBytes)
-							} else {
-								strValue = fmt.Sprintf("%v", v)
-							}
-						}
-						req.Header.Set(headerName, strValue)
-						break
-					}
-				case "Sources":
-					// Get the value from source values
-					if sourceValue, ok := sourceValues[value]; ok {
-						req.Header.Set(headerName, sourceValue)
-						break
-					}
-				}
-			}
-		}
-	}
-}
-
-// injectPublicHeaders injects headers for public routes
-func (j *JwtPlugin) injectPublicHeaders(req *http.Request, publicRoute PublicRouteMatch) error {
-	for headerName, headerConfig := range publicRoute.InjectNewHeaders {
-		// Keep track if we found any valid header
-		headerFound := false
-		
-		// Process each From and Key pair by position
-		for i := 0; i < len(headerConfig.From); i++ {
-			// Skip if there's no matching Key for this From
-			if i >= len(headerConfig.Key) {
+// injectHeaders injects headers from JWT payload
+func (p *JwtPlugin) injectHeaders(req *http.Request, claims jwt.MapClaims) error {
+	for headerName, headerCfg := range p.config.InjectNewHeaders {
+		for i, fromType := range headerCfg.From {
+			if i >= len(headerCfg.Values) {
 				continue
 			}
 			
-			fromType := headerConfig.From[i]
-			keyValue := headerConfig.Key[i]
+			value := headerCfg.Values[i]
 			
-			if fromType == "Sources" {
-				// Get the value from the request headers or query
-				headerValue := req.Header.Get(keyValue)
+			if fromType == "JwtPayloadFields" {
+				if claimValue, ok := claims[value]; ok {
+					// Convert claim value to string
+					var strValue string
+					switch v := claimValue.(type) {
+					case string:
+						strValue = v
+					case float64:
+						strValue = fmt.Sprintf("%v", v)
+					case bool:
+						strValue = fmt.Sprintf("%v", v)
+					default:
+						strValue = fmt.Sprintf("%v", v)
+					}
+					
+					req.Header.Set(headerName, strValue)
+					break
+				}
+			} else if fromType == "Sources" {
+				headerValue := req.Header.Get(value)
 				if headerValue != "" {
 					req.Header.Set(headerName, headerValue)
-					headerFound = true
-					break // Stop after finding the first valid value
+					break
 				}
 			}
-			// Additional source types can be added here
-		}
-		
-		// If we've gone through all options and haven't found a header,
-		// return an error for the last option in the chain
-		if !headerFound && len(headerConfig.From) > 0 {
-			return fmt.Errorf("no valid header found for %s", headerName)
 		}
 	}
 	
 	return nil
 }
 
-// ServeHTTP implements the http.Handler interface.
-func (j *JwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// Check if the request matches any public route
-	for _, publicRoute := range j.config.RoutesToBypassJwtValidation {
-		if j.matchRoute(req, publicRoute.Match) {
-			// For public routes, inject headers if configured
-			err := j.injectPublicHeaders(req, publicRoute)
-			if err != nil {
-				// Log and return the generic error message for public route errors
-				j.errorResponse(rw, j.config.ErrorMessage, err, http.StatusBadRequest, true)
-				return
+// injectPublicHeaders injects headers for public routes
+func (p *JwtPlugin) injectPublicHeaders(req *http.Request, headers map[string]PublicHeaderValue) error {
+	for headerName, headerCfg := range headers {
+		// Flag to track if we found a value for this header
+		valueFound := false
+		
+		// Try each source in order until we find a value
+		for i, fromType := range headerCfg.From {
+			if i >= len(headerCfg.Key) {
+				continue
 			}
 			
-			// No JWT validation needed, proceed to next handler
-			j.next.ServeHTTP(rw, req)
-			return
-		}
-	}
-
-	// Check if this route should bypass token expiration
-	bypassExpiration := false
-	for _, route := range j.config.RoutesToBypassTokenExpiration {
-		if j.matchRoute(req, route.Match) {
-			bypassExpiration = true
-			break
-		}
-	}
-
-	// Extract token from request
-	tokenString, sourceValues, err := j.extractToken(req)
-	if err != nil {
-		// Log and return the generic error message for token extraction errors
-		j.errorResponse(rw, j.config.ErrorMessage, err, http.StatusUnauthorized, true)
-		return
-	}
-
-	// Validate token
-	claims, err := j.validateToken(tokenString, bypassExpiration)
-	if err != nil {
-		// Only use the expiration message for expired tokens
-		if err.Error() == "token is expired" {
-			// Don't log expiration errors
-			j.errorResponse(rw, j.config.ExpirationMessage, err, http.StatusUnauthorized, false)
-			return
+			key := headerCfg.Key[i]
+			
+			if fromType == "Sources" {
+				headerValue := req.Header.Get(key)
+				if headerValue != "" {
+					req.Header.Set(headerName, headerValue)
+					valueFound = true
+					break
+				}
+			} else {
+				return fmt.Errorf("unsupported source type for public routes: %s", fromType)
+			}
 		}
 		
-		// For all other validation errors, log and return the generic message
-		j.errorResponse(rw, j.config.ErrorMessage, err, http.StatusUnauthorized, true)
-		return
+		// If we didn't find a value for this header, return an error
+		if !valueFound {
+			return fmt.Errorf("required header missing for public route: %s", headerName)
+		}
 	}
+	
+	return nil
+}
 
-	// Inject headers if configured
-	j.injectHeaders(req, claims, sourceValues)
+// matchRoute checks if a request matches a Traefik route matcher expression
+func (p *JwtPlugin) matchRoute(req *http.Request, matchExpr string) bool {
+	// Split the expression by logical operators
+	if strings.Contains(matchExpr, "&&") {
+		exprs := strings.Split(matchExpr, "&&")
+		for _, expr := range exprs {
+			expr = strings.TrimSpace(expr)
+			if !p.matchSingleExpression(req, expr) {
+				return false
+			}
+		}
+		return true
+	} else if strings.Contains(matchExpr, "||") {
+		exprs := strings.Split(matchExpr, "||")
+		for _, expr := range exprs {
+			expr = strings.TrimSpace(expr)
+			if p.matchSingleExpression(req, expr) {
+				return true
+			}
+		}
+		return false
+	}
+	
+	return p.matchSingleExpression(req, matchExpr)
+}
 
-	// Call the next handler
-	j.next.ServeHTTP(rw, req)
+// matchSingleExpression matches a single Traefik route matcher expression
+func (p *JwtPlugin) matchSingleExpression(req *http.Request, expr string) bool {
+	// Parse expressions like Host(`example.com`), Method(`GET`), PathPrefix(`/api`)
+	if strings.HasPrefix(expr, "Host(") && strings.HasSuffix(expr, ")") {
+		host := extractValue(expr)
+		return req.Host == host
+	} else if strings.HasPrefix(expr, "Method(") && strings.HasSuffix(expr, ")") {
+		method := extractValue(expr)
+		return req.Method == method
+	} else if strings.HasPrefix(expr, "PathPrefix(") && strings.HasSuffix(expr, ")") {
+		prefix := extractValue(expr)
+		return strings.HasPrefix(req.URL.Path, prefix)
+	}
+	
+	// Unsupported expression
+	return false
+}
+
+// extractValue extracts the value from a Traefik expression like Function(`value`)
+func extractValue(expr string) string {
+	// Find the opening backtick
+	start := strings.Index(expr, "`")
+	if start == -1 {
+		return ""
+	}
+	
+	// Find the closing backtick - search from the position after start
+	end := strings.LastIndex(expr, "`")
+	if end == -1 || end <= start {
+		return ""
+	}
+	
+	return expr[start+1 : end]
+}
+
+// respondWithError sends an error response with the given status and message
+func (p *JwtPlugin) respondWithError(rw http.ResponseWriter, status int, message string) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(status)
+	
+	response := map[string]string{
+		"message": message,
+	}
+	
+	json.NewEncoder(rw).Encode(response)
 }
