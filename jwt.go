@@ -179,12 +179,8 @@ func (p *JwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	
 	if err != nil {
-		var isExpired bool
-		
 		// Check if the error is due to an expired token
 		if strings.Contains(err.Error(), "token is expired") {
-			isExpired = true
-			
 			// If this route bypasses expiration, proceed anyway
 			if bypassExpiration {
 				// This check confirms we have a signature error, not another kind of error
@@ -194,13 +190,13 @@ func (p *JwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			}
 			
 			// Token is expired and route doesn't bypass expiration or has other errors
-			p.logError(err, true) // Won't actually log since isExpired is true
+			// Don't log expiration errors
 			p.respondWithError(rw, http.StatusUnauthorized, p.config.ExpirationMessage)
 			return
 		}
 		
 		// Log other JWT errors (not expiration)
-		p.logError(err, isExpired)
+		p.logError(err, false)
 		p.respondWithError(rw, http.StatusUnauthorized, p.config.ErrorMessage)
 		return
 	}
@@ -444,5 +440,9 @@ func (p *JwtPlugin) respondWithError(rw http.ResponseWriter, status int, message
 		"message": message,
 	}
 	
-	json.NewEncoder(rw).Encode(response)
+	err := json.NewEncoder(rw).Encode(response)
+	if err != nil {
+		// Log encoding error but don't attempt to write another response
+		p.logError(fmt.Errorf("error encoding response: %v", err), false)
+	}
 }
