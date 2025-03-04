@@ -114,7 +114,7 @@ func (p *JwtPlugin) logError(err error, isExpired bool) {
 	// We need to check the error to satisfy the linter, but there's not much we can do if stderr fails
 	if writeErr != nil {
 		// Attempt one more direct write as a last resort
-		os.Stderr.WriteString(fmt.Sprintf("Failed to log error: %v\n", writeErr))
+		_, _ = os.Stderr.WriteString(fmt.Sprintf("Failed to log error: %v\n", writeErr))
 	}
 }
 
